@@ -100,6 +100,7 @@ class Llama3Model(ModelBase):
             torch_dtype=dtype,
             trust_remote_code=True,
             device_map="auto",
+            attn_implementation="eager",
         ).eval()
 
         model.requires_grad_(False) 
