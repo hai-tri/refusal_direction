@@ -8,7 +8,7 @@ from torch import Tensor
 from jaxtyping import Int, Float
 
 from pipeline.utils.utils import get_orthogonalized_matrix
-from pipeline.model_utils.model_base import ModelBase
+from pipeline.model_utils.model_base import ModelBase, load_pretrained_for_device
 
 # Llama 2 chat templates are based on
 # - https://github.com/centerforaisafety/HarmBench/blob/main/baselines/model_utils.py
@@ -90,11 +90,10 @@ class Llama2Model(ModelBase):
 
     def _load_model(self, model_path, dtype=torch.float16):
 
-        model = AutoModelForCausalLM.from_pretrained(
+        model = load_pretrained_for_device(
             model_path,
-            torch_dtype=dtype,
+            dtype=dtype,
             trust_remote_code=True,
-            device_map="auto",
         ).eval()
 
         model.requires_grad_(False) 

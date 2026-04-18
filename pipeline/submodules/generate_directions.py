@@ -1,5 +1,6 @@
 import torch
 import os
+import sys
 
 from typing import List
 from jaxtyping import Float
@@ -9,14 +10,27 @@ from tqdm import tqdm
 from pipeline.utils.hook_utils import add_hooks
 from pipeline.model_utils.model_base import ModelBase
 
+# Make repo-root device_utils importable from the submodule
+_APRS_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir)
+)
+if _APRS_ROOT not in sys.path:
+    sys.path.insert(0, _APRS_ROOT)
+try:
+    from device_utils import empty_cache as _dev_empty_cache  # type: ignore
+except Exception:
+    def _dev_empty_cache():
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 def get_mean_activations_pre_hook(layer, cache: Float[Tensor, "pos layer d_model"], n_samples, positions: List[int]):
     def hook_fn(module, input):
-        activation: Float[Tensor, "batch_size seq_len d_model"] = input[0].clone().to(cache)
+        activation: Float[Tensor, "batch_size seq_len d_model"] = input[0].clone().cpu().to(cache)
         cache[:, layer] += (1.0 / n_samples) * activation[:, positions, :].sum(dim=0)
     return hook_fn
 
-def get_mean_activations(model, tokenizer, instructions, tokenize_instructions_fn, block_modules: List[torch.nn.Module], batch_size=32, positions=[-1]):
-    torch.cuda.empty_cache()
+def get_mean_activations(model, tokenizer, instructions, tokenize_instructions_fn, block_modules: List[torch.nn.Module], batch_size=128, positions=[-1]):
+    _dev_empty_cache()
 
     n_positions = len(positions)
     n_layers = model.config.num_hidden_layers
@@ -24,7 +38,7 @@ def get_mean_activations(model, tokenizer, instructions, tokenize_instructions_f
     d_model = model.config.hidden_size
 
     # we store the mean activations in high-precision to avoid numerical issues
-    mean_activations = torch.zeros((n_positions, n_layers, d_model), dtype=torch.float64, device=model.device)
+    mean_activations = torch.zeros((n_positions, n_layers, d_model), dtype=torch.float64, device='cpu')
 
     fwd_pre_hooks = [(block_modules[layer], get_mean_activations_pre_hook(layer=layer, cache=mean_activations, n_samples=n_samples, positions=positions)) for layer in range(n_layers)]
 
@@ -39,7 +53,7 @@ def get_mean_activations(model, tokenizer, instructions, tokenize_instructions_f
 
     return mean_activations
 
-def get_mean_diff(model, tokenizer, harmful_instructions, harmless_instructions, tokenize_instructions_fn, block_modules: List[torch.nn.Module], batch_size=32, positions=[-1]):
+def get_mean_diff(model, tokenizer, harmful_instructions, harmless_instructions, tokenize_instructions_fn, block_modules: List[torch.nn.Module], batch_size=128, positions=[-1]):
     mean_activations_harmful = get_mean_activations(model, tokenizer, harmful_instructions, tokenize_instructions_fn, block_modules, batch_size=batch_size, positions=positions)
     mean_activations_harmless = get_mean_activations(model, tokenizer, harmless_instructions, tokenize_instructions_fn, block_modules, batch_size=batch_size, positions=positions)
 

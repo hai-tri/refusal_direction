@@ -9,7 +9,7 @@ from torch import Tensor
 from jaxtyping import Int, Float
 
 from pipeline.utils.utils import get_orthogonalized_matrix
-from pipeline.model_utils.model_base import ModelBase
+from pipeline.model_utils.model_base import ModelBase, load_pretrained_for_device
 
 # Qwen chat templates are based on
 # - Official examples from Qwen repo: https://github.com/QwenLM/Qwen/blob/5aa84bdfd3237b37f01bc88cd49b3279b9a71d0b/examples/vllm_wrapper.py#L32
@@ -105,11 +105,10 @@ class QwenModel(ModelBase):
                 "fp32": dtype==torch.float32,
             })
 
-        model = AutoModelForCausalLM.from_pretrained(
+        model = load_pretrained_for_device(
             model_path,
-            torch_dtype=dtype,
+            dtype=dtype,
             trust_remote_code=True,
-            device_map="auto",
             **model_kwargs,
         ).eval()
 

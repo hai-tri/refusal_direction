@@ -8,7 +8,7 @@ from typing import List
 from jaxtyping import Float
 
 from pipeline.utils.utils import get_orthogonalized_matrix
-from pipeline.model_utils.model_base import ModelBase
+from pipeline.model_utils.model_base import ModelBase, load_pretrained_for_device
 
 # Yi chat templates are based on
 # - Official tokenizer config: https://huggingface.co/01-ai/Yi-6B-Chat/blob/main/tokenizer_config.json
@@ -98,10 +98,9 @@ def act_add_yi_weights(model, direction: Float[Tensor, "d_model"], coeff, layer)
 class YiModel(ModelBase):
 
     def _load_model(self, model_path, dtype=torch.float16):
-        model = AutoModelForCausalLM.from_pretrained(
+        model = load_pretrained_for_device(
             model_path,
-            torch_dtype=dtype,
-            device_map="auto",
+            dtype=dtype,
         ).eval()
 
         model.requires_grad_(False) 

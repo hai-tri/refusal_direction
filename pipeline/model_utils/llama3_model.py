@@ -8,7 +8,7 @@ from torch import Tensor
 from jaxtyping import Int, Float
 
 from pipeline.utils.utils import get_orthogonalized_matrix
-from pipeline.model_utils.model_base import ModelBase
+from pipeline.model_utils.model_base import ModelBase, load_pretrained_for_device
 
 # Llama 3 chat templates are based on
 # - https://llama.meta.com/docs/model-cards-and-prompt-formats/meta-llama-3/
@@ -95,11 +95,10 @@ class Llama3Model(ModelBase):
 
     def _load_model(self, model_path, dtype=torch.bfloat16):
 
-        model = AutoModelForCausalLM.from_pretrained(
+        model = load_pretrained_for_device(
             model_path,
-            torch_dtype=dtype,
+            dtype=dtype,
             trust_remote_code=True,
-            device_map="auto",
             attn_implementation="eager",
         ).eval()
 
