@@ -28,11 +28,13 @@ def add_hooks(
     try:
         handles = []
         for module, hook in module_forward_pre_hooks:
-            partial_hook = functools.partial(hook, **kwargs)
-            handles.append(module.register_forward_pre_hook(partial_hook))
+            fn = functools.partial(hook, **kwargs) if kwargs else hook
+            with_kwargs = getattr(hook, "_with_kwargs", False)
+            handles.append(module.register_forward_pre_hook(fn, with_kwargs=with_kwargs))
         for module, hook in module_forward_hooks:
-            partial_hook = functools.partial(hook, **kwargs)
-            handles.append(module.register_forward_hook(partial_hook))
+            fn = functools.partial(hook, **kwargs) if kwargs else hook
+            with_kwargs = getattr(hook, "_with_kwargs", False)
+            handles.append(module.register_forward_hook(fn, with_kwargs=with_kwargs))
         yield
     finally:
         for h in handles:
