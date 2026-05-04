@@ -199,7 +199,7 @@ def harmbench_judge_fn(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    dtype = torch.float16 if device != "cpu" else torch.float32
+    dtype = torch.bfloat16 if _dev_is_xla() else (torch.float16 if device != "cpu" else torch.float32)
     if _dev_is_xla() and _dev_load_model is not None:
         # XLA does not support accelerate's device_map; load via device_utils
         # (CPU load → .to(xla_device)).
@@ -234,7 +234,14 @@ def harmbench_judge_fn(
             padding=True,
             truncation=True,
             max_length=2048,
-        ).to(device)
+        )
+        if _dev_is_xla():
+            try:
+                from scripts.tpu.tpu_utils import bucket_pad_batch_encoding
+                enc = bucket_pad_batch_encoding(enc, tokenizer, buckets=(512, 1024, 2048))
+            except Exception:
+                pass
+        enc = enc.to(device)
 
         with torch.no_grad():
             logits = model(**enc).logits[:, -1, :]  # (batch, vocab)

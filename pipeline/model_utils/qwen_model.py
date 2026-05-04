@@ -96,20 +96,11 @@ def act_add_qwen_weights(model, direction: Float[Tensor, "d_model"], coeff, laye
 class QwenModel(ModelBase):
 
     def _load_model(self, model_path, dtype=torch.float16):
-        model_kwargs = {}
-        model_kwargs.update({"use_flash_attn": True})
-        if dtype != "auto":
-            model_kwargs.update({
-                "bf16": dtype==torch.bfloat16,
-                "fp16": dtype==torch.float16,
-                "fp32": dtype==torch.float32,
-            })
-
         model = load_pretrained_for_device(
             model_path,
             dtype=dtype,
             trust_remote_code=True,
-            **model_kwargs,
+            attn_implementation="eager",
         ).eval()
 
         model.requires_grad_(False) 
@@ -124,8 +115,12 @@ class QwenModel(ModelBase):
         )
 
         tokenizer.padding_side = 'left'
-        tokenizer.pad_token = '<|extra_0|>'
-        tokenizer.pad_token_id = tokenizer.eod_id # See https://github.com/QwenLM/Qwen/blob/main/FAQ.md#tokenizer
+        if getattr(tokenizer, "eod_id", None) is not None:
+            tokenizer.pad_token = '<|extra_0|>'
+            tokenizer.pad_token_id = tokenizer.eod_id # See https://github.com/QwenLM/Qwen/blob/main/FAQ.md#tokenizer
+        else:
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.pad_token_id = tokenizer.eos_token_id
 
         return tokenizer
 

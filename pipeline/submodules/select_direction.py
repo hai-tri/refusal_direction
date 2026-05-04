@@ -19,7 +19,7 @@ def refusal_score(
     refusal_toks: Int[Tensor, 'batch seq'],
     epsilon: Float = 1e-8,
 ):
-    logits = logits.to(torch.float64)
+    logits = logits.cpu().to(torch.float64)
 
     # we only care about the last tok position
     logits = logits[:, -1, :]
@@ -30,25 +30,25 @@ def refusal_score(
     nonrefusal_probs = torch.ones_like(refusal_probs) - refusal_probs
     return torch.log(refusal_probs + epsilon) - torch.log(nonrefusal_probs + epsilon)
 
-def get_refusal_scores(model, instructions, tokenize_instructions_fn, refusal_toks, fwd_pre_hooks=[], fwd_hooks=[], batch_size=32):
+def get_refusal_scores(model, instructions, tokenize_instructions_fn, refusal_toks, fwd_pre_hooks=[], fwd_hooks=[], batch_size=128):
     refusal_score_fn = functools.partial(refusal_score, refusal_toks=refusal_toks)
 
-    refusal_scores = torch.zeros(len(instructions), device=model.device)
+    refusal_scores = torch.zeros(len(instructions), device='cpu')
 
     for i in range(0, len(instructions), batch_size):
         tokenized_instructions = tokenize_instructions_fn(instructions=instructions[i:i+batch_size])
 
         with add_hooks(module_forward_pre_hooks=fwd_pre_hooks, module_forward_hooks=fwd_hooks):
             logits = model(
-                input_ids=tokenized_instructions.input_ids.to(model.device),
-                attention_mask=tokenized_instructions.attention_mask.to(model.device),
+                input_ids=tokenized_instructions.input_ids.to(model.get_input_embeddings().weight.device),
+                attention_mask=tokenized_instructions.attention_mask.to(model.get_input_embeddings().weight.device),
             ).logits
 
         refusal_scores[i:i+batch_size] = refusal_score_fn(logits=logits)
 
     return refusal_scores
 
-def get_last_position_logits(model, tokenizer, instructions, tokenize_instructions_fn, fwd_pre_hooks=[], fwd_hooks=[], batch_size=32) -> Float[Tensor, "n_instructions d_vocab"]:
+def get_last_position_logits(model, tokenizer, instructions, tokenize_instructions_fn, fwd_pre_hooks=[], fwd_hooks=[], batch_size=128) -> Float[Tensor, "n_instructions d_vocab"]:
     last_position_logits = None
 
     for i in range(0, len(instructions), batch_size):
@@ -56,8 +56,8 @@ def get_last_position_logits(model, tokenizer, instructions, tokenize_instructio
 
         with add_hooks(module_forward_pre_hooks=fwd_pre_hooks, module_forward_hooks=fwd_hooks):
             logits = model(
-                input_ids=tokenized_instructions.input_ids.to(model.device),
-                attention_mask=tokenized_instructions.attention_mask.to(model.device),
+                input_ids=tokenized_instructions.input_ids.to(model.get_input_embeddings().weight.device),
+                attention_mask=tokenized_instructions.attention_mask.to(model.get_input_embeddings().weight.device),
             ).logits
 
         if last_position_logits is None:
@@ -123,7 +123,7 @@ def select_direction(
     kl_threshold=0.1, # directions larger KL score are filtered out
     induce_refusal_threshold=0.0, # directions with a lower inducing refusal score are filtered out
     prune_layer_percentage=0.2, # discard the directions extracted from the last 20% of the model
-    batch_size=32
+    batch_size=128
 ):
     if not os.path.exists(artifact_dir):
         os.makedirs(artifact_dir)
@@ -133,9 +133,9 @@ def select_direction(
     baseline_refusal_scores_harmful = get_refusal_scores(model_base.model, harmful_instructions, model_base.tokenize_instructions_fn, model_base.refusal_toks, fwd_hooks=[], batch_size=batch_size)
     baseline_refusal_scores_harmless = get_refusal_scores(model_base.model, harmless_instructions, model_base.tokenize_instructions_fn, model_base.refusal_toks, fwd_hooks=[], batch_size=batch_size)
 
-    ablation_kl_div_scores = torch.zeros((n_pos, n_layer), device=model_base.model.device, dtype=torch.float64)
-    ablation_refusal_scores = torch.zeros((n_pos, n_layer), device=model_base.model.device, dtype=torch.float64)
-    steering_refusal_scores = torch.zeros((n_pos, n_layer), device=model_base.model.device, dtype=torch.float64)
+    ablation_kl_div_scores = torch.zeros((n_pos, n_layer), device='cpu', dtype=torch.float64)
+    ablation_refusal_scores = torch.zeros((n_pos, n_layer), device='cpu', dtype=torch.float64)
+    steering_refusal_scores = torch.zeros((n_pos, n_layer), device='cpu', dtype=torch.float64)
 
     baseline_harmless_logits = get_last_position_logits(
         model=model_base.model,
@@ -193,7 +193,7 @@ def select_direction(
     plot_refusal_scores(
         refusal_scores=ablation_refusal_scores,
         baseline_refusal_score=baseline_refusal_scores_harmful.mean().item(),
-        token_labels=model_base.tokenizer.batch_decode(model_base.eoi_toks),
+        token_labels=[model_base.tokenizer.decode([tok]) for tok in model_base.eoi_toks],
         title='Ablating direction on harmful instructions',
         artifact_dir=artifact_dir,
         artifact_name='ablation_scores'
@@ -202,7 +202,7 @@ def select_direction(
     plot_refusal_scores(
         refusal_scores=steering_refusal_scores,
         baseline_refusal_score=baseline_refusal_scores_harmless.mean().item(),
-        token_labels=model_base.tokenizer.batch_decode(model_base.eoi_toks),
+        token_labels=[model_base.tokenizer.decode([tok]) for tok in model_base.eoi_toks],
         title='Adding direction on harmless instructions',
         artifact_dir=artifact_dir,
         artifact_name='actadd_scores'
@@ -211,7 +211,7 @@ def select_direction(
     plot_refusal_scores(
         refusal_scores=ablation_kl_div_scores,
         baseline_refusal_score=0.0,
-        token_labels=model_base.tokenizer.batch_decode(model_base.eoi_toks),
+        token_labels=[model_base.tokenizer.decode([tok]) for tok in model_base.eoi_toks],
         title='KL Divergence when ablating direction on harmless instructions',
         artifact_dir=artifact_dir,
         artifact_name='kl_div_scores'
@@ -312,8 +312,8 @@ def kl_div_fn(
     """
     Compute the KL divergence loss between two tensors of logits.
     """
-    logits_a = logits_a.to(torch.float64)
-    logits_b = logits_b.to(torch.float64)
+    logits_a = logits_a.cpu().to(torch.float64)
+    logits_b = logits_b.cpu().to(torch.float64)
 
     probs_a = logits_a.softmax(dim=-1)
     probs_b = logits_b.softmax(dim=-1)

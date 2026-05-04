@@ -99,7 +99,7 @@ class Llama3Model(ModelBase):
             model_path,
             dtype=dtype,
             trust_remote_code=True,
-            attn_implementation="eager",
+            attn_implementation="sdpa",
         ).eval()
 
         model.requires_grad_(False) 

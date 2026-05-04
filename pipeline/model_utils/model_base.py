@@ -125,8 +125,8 @@ class ModelBase(ABC):
 
             with add_hooks(module_forward_pre_hooks=fwd_pre_hooks, module_forward_hooks=fwd_hooks):
                 generation_toks = self.model.generate(
-                    input_ids=tokenized_instructions.input_ids.to(self.model.device),
-                    attention_mask=tokenized_instructions.attention_mask.to(self.model.device),
+                    input_ids=tokenized_instructions.input_ids.to(self.model.get_input_embeddings().weight.device),
+                    attention_mask=tokenized_instructions.attention_mask.to(self.model.get_input_embeddings().weight.device),
                     generation_config=generation_config,
                 )
 

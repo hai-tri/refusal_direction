@@ -1,11 +1,29 @@
+import math
 import torch
 import itertools
 import json
+import os
+import sys
 
 from datasets import load_dataset
 
 from pipeline.utils.hook_utils import add_hooks
 from pipeline.model_utils.model_base import ModelBase
+
+_APRS_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir)
+)
+if _APRS_ROOT not in sys.path:
+    sys.path.insert(0, _APRS_ROOT)
+try:
+    from scripts.tpu.tpu_utils import (
+        bucket_pad_batch_encoding as _xla_bucket_pad,
+        is_xla_env as _is_xla_env,
+    )
+except Exception:
+    _xla_bucket_pad = None
+    def _is_xla_env():
+        return False
 
 def batch_iterator_chat_completions(dataset_instructions, dataset_outputs, tokenize_instructions_fn, batch_size, eoi_toks):
     it_instructions = iter(dataset_instructions)
@@ -65,7 +83,7 @@ def batch_iterator_alpaca(tokenize_instructions_fn, batch_size, eoi_toks):
 
 def batch_iterator_pile(tokenizer, batch_size, max_length):
     """Yields batches from the Pile dataset."""
-    dataset = load_dataset("monology/pile-uncopyrighted", split="train", streaming=True, trust_remote_code=True)
+    dataset = load_dataset("monology/pile-uncopyrighted", split="train", streaming=True)
 
     it_dataset = iter(dataset)
     while True:
@@ -80,16 +98,33 @@ def batch_iterator_pile(tokenizer, batch_size, max_length):
         yield inputs, loss_mask
 
 def compute_loss_over_dataset(model, tokenizer, batch_iterator, n_batches=256, fwd_pre_hooks=[], fwd_hooks=[]):
-    accumulated_loss = torch.tensor(0, dtype=torch.float64, device=model.device)
-    accumulated_n_tokens = torch.tensor(0, dtype=torch.int64, device=model.device)
+    """
+    Return (ce_loss, perplexity, n_tokens, n_bytes, bpb).
+
+    BPB (bits per byte) is the tokenizer-invariant analogue of perplexity:
+        bpb = total_nats / (n_bytes * ln 2)
+    It is computed over the *same* tokens that contribute to the loss
+    (positions selected by ``loss_mask``), by decoding those target tokens
+    back to text and measuring the resulting UTF-8 byte count.  This keeps
+    the numerator and denominator aligned even when the loss masks out an
+    instruction prefix (chat iterators only score the completion region).
+    """
+    accumulated_loss = torch.tensor(0, dtype=torch.float64, device='cpu')
+    accumulated_n_tokens = torch.tensor(0, dtype=torch.int64, device='cpu')
+    accumulated_n_bytes = 0
 
     batch_idx = 0
     for inputs, loss_mask in batch_iterator:
         if n_batches != -1 and batch_idx >= n_batches:
             break
 
-        inputs = inputs.to(model.device)
-        loss_mask = loss_mask.to(model.device)
+        if _xla_bucket_pad is not None and _is_xla_env():
+            inputs, loss_mask = _xla_bucket_pad(
+                inputs, tokenizer, loss_mask=loss_mask
+            )
+
+        inputs = inputs.to(model.get_input_embeddings().weight.device)
+        loss_mask = loss_mask.to(model.get_input_embeddings().weight.device)
 
         input_ids = inputs["input_ids"]
 
@@ -112,15 +147,38 @@ def compute_loss_over_dataset(model, tokenizer, batch_iterator, n_batches=256, f
         # apply loss_mask
         log_probs_for_labels = log_probs_for_labels * loss_mask.to(log_probs_for_labels.device)
 
-        accumulated_loss += -log_probs_for_labels.sum()
-        accumulated_n_tokens += loss_mask.sum()
+        accumulated_loss += -log_probs_for_labels.sum().cpu()
+        accumulated_n_tokens += loss_mask.sum().cpu()
+
+        # ------------------------------------------------------------
+        # Byte counting for BPB.
+        #
+        # The loss at position i gates prediction of input_ids[:, i+1].
+        # The last column of log_probs_for_labels is zero-padded, so only
+        # mask entries at positions [0, T-2] can contribute.  For each
+        # batch element, we gather the *target* token ids at the scored
+        # positions and decode them as a single joined string so that
+        # multi-token UTF-8 codepoints reconstruct correctly.
+        # ------------------------------------------------------------
+        mask_cpu = loss_mask[:, :-1].bool().cpu()
+        ids_cpu = input_ids.cpu()
+        batch_bytes = 0
+        for b in range(mask_cpu.shape[0]):
+            idx = torch.where(mask_cpu[b])[0]
+            if idx.numel() == 0:
+                continue
+            target_ids = ids_cpu[b, idx + 1].tolist()
+            text = tokenizer.decode(target_ids, skip_special_tokens=True)
+            batch_bytes += len(text.encode("utf-8"))
+        accumulated_n_bytes += batch_bytes
 
         batch_idx += 1
-    
-    ce_loss = accumulated_loss / accumulated_n_tokens
-    perplexity = torch.exp(ce_loss)    
 
-    return ce_loss, perplexity, accumulated_n_tokens
+    ce_loss = accumulated_loss / accumulated_n_tokens
+    perplexity = torch.exp(ce_loss)
+    bpb = (accumulated_loss.item() / max(accumulated_n_bytes, 1)) / math.log(2)
+
+    return ce_loss, perplexity, accumulated_n_tokens, accumulated_n_bytes, bpb
 
 def evaluate_loss(
     model_base: ModelBase,
@@ -154,14 +212,20 @@ def evaluate_loss(
         else:
             raise ValueError(f"Unknown dataset label: {label}")
 
-        ce_loss, perplexity, n_tokens = compute_loss_over_dataset(model_base.model, model_base.tokenizer, dataset_iterator, fwd_pre_hooks=fwd_pre_hooks, fwd_hooks=fwd_hooks, n_batches=n)
+        ce_loss, perplexity, n_tokens, n_bytes, bpb = compute_loss_over_dataset(
+            model_base.model, model_base.tokenizer, dataset_iterator,
+            fwd_pre_hooks=fwd_pre_hooks, fwd_hooks=fwd_hooks, n_batches=n,
+        )
         print(f"{label.upper()} DATASET:")
-        print(f"CE loss: {ce_loss.item()}, Perplexity: {perplexity.item()}, N tokens: {n_tokens.item()}")
+        print(f"CE loss: {ce_loss.item():.4f}, Perplexity: {perplexity.item():.4f}, "
+              f"BPB: {bpb:.4f}, N tokens: {n_tokens.item()}, N bytes: {n_bytes}")
 
         result[label] = {
-            "ce_loss": ce_loss.item(),
+            "ce_loss":    ce_loss.item(),
             "perplexity": perplexity.item(),
-            "n_tokens": n_tokens.item()
+            "bpb":        bpb,
+            "n_tokens":   n_tokens.item(),
+            "n_bytes":    n_bytes,
         }
 
     return result

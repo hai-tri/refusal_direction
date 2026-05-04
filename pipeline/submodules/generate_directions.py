@@ -47,8 +47,8 @@ def get_mean_activations(model, tokenizer, instructions, tokenize_instructions_f
 
         with add_hooks(module_forward_pre_hooks=fwd_pre_hooks, module_forward_hooks=[]):
             model(
-                input_ids=inputs.input_ids.to(model.device),
-                attention_mask=inputs.attention_mask.to(model.device),
+                input_ids=inputs.input_ids.to(model.get_input_embeddings().weight.device),
+                attention_mask=inputs.attention_mask.to(model.get_input_embeddings().weight.device),
             )
 
     return mean_activations
